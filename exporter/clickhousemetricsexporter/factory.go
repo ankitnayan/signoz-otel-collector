@@ -17,9 +17,11 @@ package clickhousemetricsexporter
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/open-telemetry/opentelemetry-collector-contrib/pkg/resourcetotelemetry"
+	"go.opentelemetry.io/collector/client"
 	"go.opentelemetry.io/collector/component"
 	"go.opentelemetry.io/collector/config"
 	"go.opentelemetry.io/collector/config/confighttp"
@@ -39,9 +41,17 @@ func NewFactory() component.ExporterFactory {
 		component.WithMetricsExporter(createMetricsExporter))
 }
 
-func createMetricsExporter(_ context.Context, set component.ExporterCreateSettings,
+func createMetricsExporter(ctx context.Context, set component.ExporterCreateSettings,
 	cfg config.Exporter) (component.MetricsExporter, error) {
 
+	cl := client.FromContext(ctx)
+	attributes := cl.Auth.GetAttributeNames()
+	fmt.Println("******** Getting Attributes ")
+	fmt.Println("----> ", len(attributes))
+	for _, attribute := range attributes {
+		fmt.Println("\n*******************")
+		fmt.Println(attribute, " : ", cl.Auth.GetAttribute(attribute))
+	}
 	prwCfg, ok := cfg.(*Config)
 	if !ok {
 		return nil, errors.New("invalid configuration")
