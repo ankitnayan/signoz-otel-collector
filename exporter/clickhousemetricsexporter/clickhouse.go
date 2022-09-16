@@ -28,6 +28,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/common/model"
 	"github.com/sirupsen/logrus"
+	"go.opentelemetry.io/collector/client"
 
 	"github.com/SigNoz/signoz-otel-collector/exporter/clickhousemetricsexporter/base"
 	"github.com/SigNoz/signoz-otel-collector/exporter/clickhousemetricsexporter/utils/timeseries"
@@ -225,6 +226,14 @@ func (ch *clickHouse) Collect(c chan<- prometheus.Metric) {
 }
 
 func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) error {
+
+	cl := client.FromContext(ctx)
+	attributes := cl.Auth.GetAttributeNames()
+	for _, attribute := range attributes {
+		fmt.Println("\n*******************")
+		fmt.Println(attribute, " : ", cl.Auth.GetAttribute(attribute))
+	}
+
 	// calculate fingerprints, map them to time series
 	fingerprints := make([]uint64, len(data.Timeseries))
 	timeSeries := make(map[uint64][]*prompb.Label, len(data.Timeseries))
