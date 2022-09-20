@@ -53,9 +53,12 @@ extensions:
 exporters:
   otlp:
     endpoint: ingest.signoz.io:4317
-
+    headers:
+      "signoz-access-token": "Bearer c7341bc2-a857-4f2d-b2c6-654f130feaa3"
   otlphttp:
     endpoint: https://ingest.signoz.io:4318
+    headers:
+      "signoz-access-token": "Bearer c7341bc2-a857-4f2d-b2c6-654f130feaa3"
 
   # clickhousetraces:
   #   datasource: tcp://localhost:9000/?database=signoz_traces
