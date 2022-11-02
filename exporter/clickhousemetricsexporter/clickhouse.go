@@ -82,7 +82,7 @@ func NewClickHouse(params *ClickHouseParams) (base.Storage, error) {
 	queries = append(queries, fmt.Sprintf(`CREATE DATABASE IF NOT EXISTS %s ON CLUSTER signoz`, database))
 
 	queries = append(queries, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s.samples_v2 ON CLUSTER signoz (
+		CREATE TABLE IF NOT EXISTS %s.samples_v3_keys_and_values ON CLUSTER signoz (
 			metric_name LowCardinality(String),
 			fingerprint UInt64 Codec(DoubleDelta, LZ4),
 			timestamp_ms Int64 Codec(Delta, LZ4),
@@ -90,16 +90,16 @@ func NewClickHouse(params *ClickHouseParams) (base.Storage, error) {
 			labels_keys Array(String) Codec(ZSTD(2)),
 			labels_values Array(String) Codec(ZSTD(2))
 		)
-		ENGINE = ReplicatedMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/samples_v2', '{replica}')
+		ENGINE = ReplicatedMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/samples_v3_keys_and_values', '{replica}')
 			PARTITION BY toDate(timestamp_ms / 1000)
 			ORDER BY (metric_name, fingerprint, timestamp_ms)
 			SETTINGS index_granularity = 1024;`, database))
 
 	queries = append(queries, fmt.Sprintf(`
-			CREATE TABLE IF NOT EXISTS %s.distributed_samples_v2 ON CLUSTER signoz AS %s.samples_v2 ENGINE = Distributed("signoz", "%s", samples_v2, cityHash64(metric_name));`, database, database, database))
+			CREATE TABLE IF NOT EXISTS %s.distributed_samples_v3_keys_and_values ON CLUSTER signoz AS %s.samples_v3_keys_and_values ENGINE = Distributed("signoz", "%s", samples_v3_keys_and_values, cityHash64(metric_name));`, database, database, database))
 
 	queries = append(queries, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s.time_series_v2 ON CLUSTER signoz(
+		CREATE TABLE IF NOT EXISTS %s.time_series_v3 ON CLUSTER signoz(
 			metric_name LowCardinality(String),
 			fingerprint UInt64 Codec(DoubleDelta, LZ4),
 			timestamp_ms Int64 Codec(DoubleDelta, LZ4),
@@ -107,12 +107,12 @@ func NewClickHouse(params *ClickHouseParams) (base.Storage, error) {
 			INDEX idx_labels_keys mapKeys(labels) TYPE ngrambf_v1(4, 1024, 3, 0) GRANULARITY 1,
 			INDEX idx_labels_values mapValues(labels) TYPE ngrambf_v1(4, 1024, 3, 0) GRANULARITY 1
 		)
-		ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/time_series_v2', '{replica}')
+		ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/time_series_v3', '{replica}')
 			PARTITION BY toDate(timestamp_ms / 1000)
 			ORDER BY (metric_name, fingerprint)`, database))
 
 	queries = append(queries, fmt.Sprintf(`
-			CREATE TABLE IF NOT EXISTS %s.distributed_time_series_v2 ON CLUSTER signoz AS %s.time_series_v2 ENGINE = Distributed("signoz", %s, time_series_v2, cityHash64(metric_name));`, database, database, database))
+			CREATE TABLE IF NOT EXISTS %s.distributed_time_series_v3 ON CLUSTER signoz AS %s.time_series_v3 ENGINE = Distributed("signoz", %s, time_series_v3, cityHash64(metric_name));`, database, database, database))
 
 	options := &clickhouse.Options{
 		Addr: []string{dsnURL.Host},
@@ -176,7 +176,7 @@ func (ch *clickHouse) runTimeSeriesReloader(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	q := fmt.Sprintf(`SELECT DISTINCT fingerprint FROM %s.distributed_time_series_v2`, ch.database)
+	q := fmt.Sprintf(`SELECT DISTINCT fingerprint FROM %s.distributed_time_series_v3`, ch.database)
 	for {
 		ch.timeSeriesRW.RLock()
 		timeSeries := make(map[uint64]struct{}, len(ch.timeSeries))
@@ -279,7 +279,7 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 	err := func() error {
 		ctx := context.Background()
 
-		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.distributed_time_series_v2 (metric_name, timestamp_ms, fingerprint, labels) VALUES (?, ?, ?, ?)", ch.database))
+		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.distributed_time_series_v3 (metric_name, timestamp_ms, fingerprint, labels) VALUES (?, ?, ?, ?)", ch.database))
 		if err != nil {
 			return err
 		}
@@ -307,7 +307,7 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 	err = func() error {
 		ctx := context.Background()
 
-		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.distributed_samples_v2", ch.database))
+		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.distributed_samples_v3_keys_and_values", ch.database))
 		if err != nil {
 			return err
 		}
