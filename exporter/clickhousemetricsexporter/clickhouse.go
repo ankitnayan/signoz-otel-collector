@@ -85,28 +85,27 @@ func NewClickHouse(params *ClickHouseParams) (base.Storage, error) {
 		CREATE TABLE IF NOT EXISTS %s.samples_v2 ON CLUSTER signoz (
 			metric_name LowCardinality(String),
 			fingerprint UInt64 Codec(DoubleDelta, LZ4),
-			timestamp_ms Int64 Codec(DoubleDelta, LZ4),
-			value Float64 Codec(Gorilla, LZ4)
+			timestamp_ms Int64 Codec(Delta, LZ4),
+			value Float64 Codec(Gorilla, LZ4),
+			labels_keys Array(String) Codec(ZSTD(2)),
+			labels_values Array(String) Codec(ZSTD(2))
 		)
 		ENGINE = ReplicatedMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/samples_v2', '{replica}')
 			PARTITION BY toDate(timestamp_ms / 1000)
-			ORDER BY (metric_name, fingerprint, timestamp_ms);`, database))
+			ORDER BY (metric_name, fingerprint, timestamp_ms)
+			SETTINGS index_granularity = 1024;`, database))
 
 	queries = append(queries, fmt.Sprintf(`
 			CREATE TABLE IF NOT EXISTS %s.distributed_samples_v2 ON CLUSTER signoz AS %s.samples_v2 ENGINE = Distributed("signoz", "%s", samples_v2, cityHash64(metric_name));`, database, database, database))
 
-	queries = append(queries, `SET allow_experimental_object_type = 1`)
-
-	// reading and writing of JSON object are not yet supported
-	// in clickhouse-go. We workaround this limitation for now by
-	// using the DEFAULT expression. However, we can use labels_object
-	// in the querying for faster results.
 	queries = append(queries, fmt.Sprintf(`
 		CREATE TABLE IF NOT EXISTS %s.time_series_v2 ON CLUSTER signoz(
 			metric_name LowCardinality(String),
 			fingerprint UInt64 Codec(DoubleDelta, LZ4),
 			timestamp_ms Int64 Codec(DoubleDelta, LZ4),
-			labels String Codec(ZSTD(5))
+			labels Map(String, String) CODEC(ZSTD(1)),
+			INDEX idx_labels_keys mapKeys(labels) TYPE ngrambf_v1(4, 1024, 3, 0) GRANULARITY 1,
+			INDEX idx_labels_values mapValues(labels) TYPE ngrambf_v1(4, 1024, 3, 0) GRANULARITY 1
 		)
 		ENGINE = ReplicatedReplacingMergeTree('/clickhouse/tables/{cluster}/{shard}/signoz_metrics/time_series_v2', '{replica}')
 			PARTITION BY toDate(timestamp_ms / 1000)
@@ -230,6 +229,7 @@ func (ch *clickHouse) Collect(c chan<- prometheus.Metric) {
 }
 
 func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) error {
+	start := time.Now()
 	// calculate fingerprints, map them to time series
 	fingerprints := make([]uint64, len(data.Timeseries))
 	timeSeries := make(map[uint64][]*prompb.Label, len(data.Timeseries))
@@ -237,15 +237,19 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 
 	for i, ts := range data.Timeseries {
 		var metricName string
-		labels := make([]*prompb.Label, len(ts.Labels))
-		for j, label := range ts.Labels {
-			labels[j] = &prompb.Label{
+		labelsOverridden := make(map[string]*prompb.Label)
+		for _, label := range ts.Labels {
+			labelsOverridden[label.Name] = &prompb.Label{
 				Name:  label.Name,
 				Value: label.Value,
 			}
 			if label.Name == "__name__" {
 				metricName = label.Value
 			}
+		}
+		var labels []*prompb.Label
+		for _, l := range labelsOverridden {
+			labels = append(labels, l)
 		}
 		timeseries.SortLabels(labels)
 		f := timeseries.Fingerprint(labels)
@@ -258,23 +262,22 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 	}
 
 	// find new time series
-	newTimeSeries := make(map[uint64][]*prompb.Label)
+	newTimeSeries := make(map[uint64]map[string]string)
 	ch.timeSeriesRW.Lock()
 	for f, m := range timeSeries {
 		_, ok := ch.timeSeries[f]
 		if !ok {
 			ch.timeSeries[f] = struct{}{}
-			newTimeSeries[f] = m
+			newTimeSeries[f] = make(map[string]string)
+			for _, l := range m {
+				newTimeSeries[f][l.Name] = l.Value
+			}
 		}
 	}
 	ch.timeSeriesRW.Unlock()
 
 	err := func() error {
 		ctx := context.Background()
-		err := ch.conn.Exec(ctx, `SET allow_experimental_object_type = 1`)
-		if err != nil {
-			return err
-		}
 
 		statement, err := ch.conn.PrepareBatch(ctx, fmt.Sprintf("INSERT INTO %s.distributed_time_series_v2 (metric_name, timestamp_ms, fingerprint, labels) VALUES (?, ?, ?, ?)", ch.database))
 		if err != nil {
@@ -282,12 +285,11 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 		}
 		timestamp := model.Now().Time().UnixMilli()
 		for fingerprint, labels := range newTimeSeries {
-			encodedLabels := string(marshalLabels(labels, make([]byte, 0, 128)))
 			err = statement.Append(
 				fingerprintToName[fingerprint],
 				timestamp,
 				fingerprint,
-				encodedLabels,
+				labels,
 			)
 			if err != nil {
 				return err
@@ -311,12 +313,21 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 		}
 		for i, ts := range data.Timeseries {
 			fingerprint := fingerprints[i]
+			labels := timeSeries[fingerprint]
+			labelsKeys := make([]string, len(labels))
+			labelsValues := make([]string, len(labels))
+			for i, l := range labels {
+				labelsKeys[i] = l.Name
+				labelsValues[i] = l.Value
+			}
 			for _, s := range ts.Samples {
 				err = statement.Append(
 					fingerprintToName[fingerprint],
 					fingerprint,
 					s.Timestamp,
 					s.Value,
+					labelsKeys,
+					labelsValues,
 				)
 				if err != nil {
 					return err
@@ -336,6 +347,7 @@ func (ch *clickHouse) Write(ctx context.Context, data *prompb.WriteRequest) erro
 		ch.mWrittenTimeSeries.Add(float64(n))
 		ch.l.Debugf("Wrote %d new time series.", n)
 	}
+	ch.l.Infof("Batch: Wrote %d samples in %s.", len(data.Timeseries), time.Since(start))
 	return nil
 }
 

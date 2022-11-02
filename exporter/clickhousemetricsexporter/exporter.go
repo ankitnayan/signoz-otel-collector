@@ -18,11 +18,11 @@ package clickhousemetricsexporter
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pkg/errors"
 	"go.uber.org/multierr"
@@ -38,7 +38,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/pmetric"
 )
 
-const maxBatchByteSize = 3000000
+const maxBatchByteSize = 40000000
 
 // PrwExporter converts OTLP metrics to Prometheus remote write TimeSeries and sends them to a remote endpoint.
 type PrwExporter struct {
@@ -121,6 +121,7 @@ func (prwe *PrwExporter) PushMetrics(ctx context.Context, md pmetric.Metrics) er
 	case <-prwe.closeChan:
 		return errors.New("shutdown has been called")
 	default:
+		start := time.Now()
 		tsMap := map[string]*prompb.TimeSeries{}
 		dropped := 0
 		var errs error
@@ -211,6 +212,7 @@ func (prwe *PrwExporter) PushMetrics(ctx context.Context, md pmetric.Metrics) er
 			errs = multierr.Append(errs, multierr.Combine(exportErrors...))
 		}
 
+		fmt.Printf("PushMetrics took %s", time.Since(start))
 		if dropped != 0 {
 			return errs
 		}
@@ -250,6 +252,7 @@ func (prwe *PrwExporter) addNumberDataPointSlice(dataPoints pmetric.NumberDataPo
 
 // export sends a Snappy-compressed WriteRequest containing TimeSeries to a remote write endpoint in order
 func (prwe *PrwExporter) export(ctx context.Context, tsMap map[string]*prompb.TimeSeries) []error {
+	start := time.Now()
 	var errs []error
 	// Calls the helper function to convert and batch the TsMap to the desired format
 	requests, err := batchTimeSeries(tsMap, maxBatchByteSize)
@@ -267,7 +270,7 @@ func (prwe *PrwExporter) export(ctx context.Context, tsMap map[string]*prompb.Ti
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	concurrencyLimit := int(math.Min(float64(prwe.concurrency), float64(len(requests))))
+	concurrencyLimit := len(requests)
 	wg.Add(concurrencyLimit) // used to wait for workers to be finished
 
 	// Run concurrencyLimit of workers until there
@@ -287,6 +290,7 @@ func (prwe *PrwExporter) export(ctx context.Context, tsMap map[string]*prompb.Ti
 		}()
 	}
 	wg.Wait()
+	fmt.Printf("Exporting %d TimeSeries took %s", len(tsMap), time.Since(start))
 
 	return errs
 }
