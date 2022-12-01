@@ -6,4 +6,3 @@ ENGINE = Distributed("cluster", "signoz_logs", logs_atrribute_keys, cityHash64(d
 
 CREATE TABLE IF NOT EXISTS signoz_logs.distributed_logs_resource_keys  ON CLUSTER cluster AS signoz_logs.logs_resource_keys
 ENGINE = Distributed("cluster", "signoz_logs", logs_resource_keys, cityHash64(datatype));
-
